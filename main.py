@@ -35,7 +35,7 @@ MODEL_SUMMARY_DIRS = {
     'GGNet': 'summary_results_ggnet',
     'MOBNet': 'summary_results_mobnet',
     'SHFFNet': 'summary_results_shffnet',
-    'EffNet': 'summary_results_effnet',
+    'EFFNet': 'summary_results_effnet',
     'MNASNet': 'summary_results_mnasnet',
     # adicionais (usados se existirem):
     'ResNet': 'summary_results_resnet',
@@ -409,7 +409,7 @@ def run_between_models(models: List[str], ensemble_type: str, weight_metric: str
 
 if __name__ == '__main__':
     # Configure aqui os modelos e o método de ensemble.
-    MODELS = ['GGNet', 'MOBNet', 'SHFFNet', 'EffNet', 'MNASNet', 'ResNet', 'DenseNet', 'VGG']
+    MODELS = ['GGNet', 'MOBNet', 'SHFFNet', 'EFFNet', 'MNASNet', 'ResNet', 'DenseNet', 'VGG']
     ENSEMBLE_TYPE = os.environ.get('ENSEMBLE_TYPE', 'hard_voting')  # 'hard_voting' | 'soft_voting' | 'weighted'
     WEIGHT_METRIC = os.environ.get('WEIGHT_METRIC', 'f1_macro')     # usado apenas com 'weighted'
     # Exporta SA existentes para results antes de rodar MA

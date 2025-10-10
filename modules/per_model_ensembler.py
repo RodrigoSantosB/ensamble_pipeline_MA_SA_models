@@ -242,6 +242,10 @@ class PerModelEnsembler:
         combined, fold_names = self._load_folds(csv_paths)
         # labels presentes
         all_labels = set(combined['true_label'].dropna().unique().tolist()) | set(combined['predicted_label'].dropna().unique().tolist())
+        # também considerar chaves de probabilidade
+        for d in combined['probabilities'].dropna():
+            if isinstance(d, dict):
+                all_labels.update(list(d.keys()))
         all_labels_list = sorted(list(all_labels))
         label_to_int = {l: i for i, l in enumerate(all_labels_list)}
 
@@ -252,42 +256,59 @@ class PerModelEnsembler:
             weights = {f: 1.0 for f in fold_names}
 
         results: List[Dict[str, Any]] = []
-        grouped = combined.groupby('tile_name')
-        for tid, group in grouped:
+        # Alinhar com scripts de referência: agrupar por paciente e tile
+        grouped = combined.groupby(['patient_id', 'tile_name'])
+        for (pid, tid), group in grouped:
             rows = group.to_dict(orient='records')
             true_label = group['true_label'].iloc[0]
+            # Determinar probs agregadas conforme método
             if self.ENSEMBLE_TYPE == 'hard_voting':
-                pred = self._majority_vote(group['predicted_label'].tolist())
+                predicted_labels_folds = group['predicted_label'].tolist()
+                pred_ensemble = self._majority_vote(predicted_labels_folds)
                 final_probs = {}
             elif self.ENSEMBLE_TYPE == 'soft_voting':
                 final_probs = self._soft_voting_probs(rows, 'probabilities', all_labels_list)
-                pred = max(final_probs, key=final_probs.get) if final_probs else np.nan
+                pred_ensemble = max(final_probs, key=final_probs.get) if final_probs else np.nan
             elif self.ENSEMBLE_TYPE == 'weighted':
                 final_probs = self._weighted_voting_probs(rows, 'probabilities', all_labels_list, weights, 'fold_name')
-                pred = max(final_probs, key=final_probs.get) if final_probs else np.nan
+                pred_ensemble = max(final_probs, key=final_probs.get) if final_probs else np.nan
             else:
                 raise ValueError(f"Tipo de ensemble '{self.ENSEMBLE_TYPE}' não reconhecido.")
 
-            # estatísticas auxiliares
+            # estatísticas auxiliares (médias/STD das probabilidades originais dos folds)
             probs_list = [self._normalize_dict_probs(self._safe_literal_eval(r.get('probabilities', {})), all_labels_list) for r in rows]
             mean_probs = {k: float(np.mean([p[k] for p in probs_list])) if probs_list else 0.0 for k in all_labels_list}
             std_probs = {k: float(np.std([p[k] for p in probs_list])) if probs_list else 0.0 for k in all_labels_list}
             votos = Counter(group['predicted_label'].tolist())
 
+            # probabilidades do vencedor
+            predicted_probability_ensemble = float(final_probs.get(pred_ensemble, np.nan)) if isinstance(final_probs, dict) else np.nan
+            prob_mean_winner = float(mean_probs.get(pred_ensemble, np.nan)) if mean_probs else np.nan
+            prob_std_winner = float(std_probs.get(pred_ensemble, np.nan)) if std_probs else np.nan
+            mean_orig_stddev = float(group['probability_std_dev'].mean()) if 'probability_std_dev' in group.columns else np.nan
+
             results.append({
+                'patient_id': pid,
                 'tile_name': tid,
                 'image_id': group['image_id'].iloc[0] if 'image_id' in group.columns else np.nan,
-                'patient_id': group['patient_id'].iloc[0] if 'patient_id' in group.columns else np.nan,
                 'true_label': true_label,
-                'predicted_label': pred,
-                'voto_majoritario_simples': pred,
-                'final_probs': final_probs,
-                'mean_probs_per_class_tile': mean_probs,
-                'std_probs_per_class_tile': std_probs,
+                'true_label_one_hot': group['true_label_one_hot'].iloc[0] if 'true_label_one_hot' in group.columns else np.nan,
+                # nomes de saída alinhados com scripts de referência
+                'voto_majoritario_simples': votos.most_common(1)[0][0] if votos else np.nan,
                 'distribuicao_votos_simples': dict(votos),
+                'predicted_label_ensemble': pred_ensemble,
+                'predicted_probability_ensemble': predicted_probability_ensemble,
+                'mean_probs_per_class_tile': mean_probs,
+                'std_probs_per_class': std_probs,
+                'predicted_probability_mean_winner': prob_mean_winner,
+                'predicted_probability_std_winner': prob_std_winner,
+                'mean_probability_std_dev_original': mean_orig_stddev,
+                # colunas auxiliares para compatibilidade cruzada
+                'predicted_label': pred_ensemble,
+                'final_probs': final_probs,
             })
 
-        final_df = pd.DataFrame(results).set_index('tile_name')
+        final_df = pd.DataFrame(results)
 
         # salvar CSV (compatível com estrutura SA)
         if self.ENSEMBLE_TYPE == 'weighted':
@@ -301,7 +322,7 @@ class PerModelEnsembler:
         out_dir = os.path.join(self.save_output_base, subfolder)
         os.makedirs(out_dir, exist_ok=True)
         csv_path = os.path.join(out_dir, csv_name)
-        final_df.to_csv(csv_path, index=True)
+        final_df.to_csv(csv_path, index=False)
 
         df_clean = final_df.dropna(subset=['true_label', 'predicted_label'])
         metrics_path = os.path.join(out_dir, metrics_name)
@@ -318,49 +339,73 @@ class PerModelEnsembler:
         tile_df = pd.read_csv(tile_csv)
         # Descobrir labels
         all_labels = set(tile_df['true_label'].dropna().unique().tolist()) | set(tile_df['predicted_label'].dropna().unique().tolist())
+        # também considerar chaves de probabilidade
+        for d in tile_df['final_probs'].dropna():
+            if isinstance(d, dict):
+                all_labels.update(list(d.keys()))
         all_labels_list = sorted(list(all_labels))
         label_to_int = {l: i for i, l in enumerate(all_labels_list)}
 
-        # agrega por imagem
+        # também carregar dados originais para média de std_dev por imagem/paciente
+        combined, _ = self._load_folds(csv_paths)
+
+        # agrega por paciente (alinhado com scripts de referência)
         results: List[Dict[str, Any]] = []
-        grouped = tile_df.groupby('image_id')
-        for img_id, group in grouped:
+        grouped = tile_df.groupby('patient_id')
+        for pid, group in grouped:
             true_label = group['true_label'].iloc[0]
             rows = group.to_dict(orient='records')
             if self.ENSEMBLE_TYPE == 'hard_voting':
-                pred = self._majority_vote(group['predicted_label'].tolist())
+                pred_img = self._majority_vote(group['predicted_label'].tolist())
                 final_probs = {}
             elif self.ENSEMBLE_TYPE == 'soft_voting':
                 final_probs = self._soft_voting_probs(rows, 'final_probs', all_labels_list)
-                pred = max(final_probs, key=final_probs.get) if final_probs else np.nan
+                pred_img = max(final_probs, key=final_probs.get) if final_probs else np.nan
             elif self.ENSEMBLE_TYPE == 'weighted':
                 # como os final_probs dos tiles já incorporam pesos dos folds, aqui usamos soft sobre final_probs
                 final_probs = self._soft_voting_probs(rows, 'final_probs', all_labels_list)
-                pred = max(final_probs, key=final_probs.get) if final_probs else np.nan
+                pred_img = max(final_probs, key=final_probs.get) if final_probs else np.nan
             else:
                 raise ValueError(f"Tipo de ensemble '{self.ENSEMBLE_TYPE}' não reconhecido.")
 
-            votos = Counter(group['predicted_label'].tolist())
+            votos_tiles = Counter(group['predicted_label'].tolist())
 
-            # estatísticas auxiliares
+            # estatísticas auxiliares (médias/STD das probs agregadas dos tiles)
             probs_list = [self._normalize_dict_probs(self._safe_literal_eval(r.get('final_probs', {})), all_labels_list) for r in rows]
             mean_probs = {k: float(np.mean([p[k] for p in probs_list])) if probs_list else 0.0 for k in all_labels_list}
             std_probs = {k: float(np.std([p[k] for p in probs_list])) if probs_list else 0.0 for k in all_labels_list}
 
+            predicted_probability_ensemble_image = float(final_probs.get(pred_img, np.nan)) if isinstance(final_probs, dict) else np.nan
+            prob_mean_winner_image = float(mean_probs.get(pred_img, np.nan)) if mean_probs else np.nan
+            prob_std_winner_image = float(std_probs.get(pred_img, np.nan)) if std_probs else np.nan
+
+            # média de std_dev original dos tiles por paciente
+            mean_orig_stddev_tiles = np.nan
+            if 'probability_std_dev' in combined.columns:
+                try:
+                    mean_orig_stddev_tiles = float(combined[combined['patient_id'] == pid]['probability_std_dev'].mean())
+                except Exception:
+                    mean_orig_stddev_tiles = np.nan
+
             results.append({
-                'image_id': img_id,
-                'patient_id': group['patient_id'].iloc[0] if 'patient_id' in group.columns else np.nan,
+                'patient_id': pid,
                 'true_label': true_label,
-                'predicted_label': pred,
-                'predicted_label_ensemble_image': pred,
-                'final_probs': final_probs,
-                'voto_majoritario_simples_tiles': self._majority_vote(group['predicted_label'].tolist()),
-                'distribuicao_votos_simples_tiles': dict(votos),
+                'true_label_one_hot': group['true_label_one_hot'].iloc[0] if 'true_label_one_hot' in group.columns else np.nan,
+                'voto_majoritario_simples_tiles': votos_tiles.most_common(1)[0][0] if votos_tiles else np.nan,
+                'distribuicao_votos_simples_tiles': dict(votos_tiles),
+                'predicted_label_ensemble_image': pred_img,
+                'predicted_probability_ensemble_image': predicted_probability_ensemble_image,
                 'mean_probs_per_class_image': mean_probs,
                 'std_probs_per_class_image': std_probs,
+                'predicted_probability_mean_winner_image': prob_mean_winner_image,
+                'predicted_probability_std_winner_image': prob_std_winner_image,
+                'mean_probability_std_dev_original_tiles': mean_orig_stddev_tiles,
+                # compatibilidade
+                'predicted_label': pred_img,
+                'final_probs': final_probs,
             })
 
-        final_df = pd.DataFrame(results).set_index('image_id')
+        final_df = pd.DataFrame(results)
         # salvar CSV e métricas (compatível com SA)
         if self.ENSEMBLE_TYPE == 'weighted':
             csv_name = f"ensemble_per_image_weighted_{self.WEIGHT_METRIC}.csv"
@@ -373,7 +418,7 @@ class PerModelEnsembler:
         out_dir = os.path.join(self.save_output_base, subfolder)
         os.makedirs(out_dir, exist_ok=True)
         csv_path = os.path.join(out_dir, csv_name)
-        final_df.to_csv(csv_path, index=True)
+        final_df.to_csv(csv_path, index=False)
 
         df_clean = final_df.dropna(subset=['true_label', 'predicted_label'])
         metrics_path = os.path.join(out_dir, metrics_name)
@@ -390,8 +435,14 @@ class PerModelEnsembler:
         img_df = pd.read_csv(img_csv)
 
         all_labels = set(img_df['true_label'].dropna().unique().tolist()) | set(img_df['predicted_label'].dropna().unique().tolist())
+        for d in img_df['final_probs'].dropna():
+            if isinstance(d, dict):
+                all_labels.update(list(d.keys()))
         all_labels_list = sorted(list(all_labels))
         label_to_int = {l: i for i, l in enumerate(all_labels_list)}
+
+        # também carregar dados originais para média de std_dev por paciente
+        combined, _ = self._load_folds(csv_paths)
 
         results: List[Dict[str, Any]] = []
         grouped = img_df.groupby('patient_id')
@@ -399,36 +450,52 @@ class PerModelEnsembler:
             true_label = group['true_label'].iloc[0]
             rows = group.to_dict(orient='records')
             if self.ENSEMBLE_TYPE == 'hard_voting':
-                pred = self._majority_vote(group['predicted_label'].tolist())
+                pred_patient = self._majority_vote(group['predicted_label'].tolist())
                 final_probs = {}
             elif self.ENSEMBLE_TYPE == 'soft_voting':
                 final_probs = self._soft_voting_probs(rows, 'final_probs', all_labels_list)
-                pred = max(final_probs, key=final_probs.get) if final_probs else np.nan
+                pred_patient = max(final_probs, key=final_probs.get) if final_probs else np.nan
             elif self.ENSEMBLE_TYPE == 'weighted':
                 # final_probs já ponderados nos níveis anteriores → soft aqui
                 final_probs = self._soft_voting_probs(rows, 'final_probs', all_labels_list)
-                pred = max(final_probs, key=final_probs.get) if final_probs else np.nan
+                pred_patient = max(final_probs, key=final_probs.get) if final_probs else np.nan
             else:
                 raise ValueError(f"Tipo de ensemble '{self.ENSEMBLE_TYPE}' não reconhecido.")
 
-            votos = Counter(group['predicted_label'].tolist())
+            votos_imgs = Counter(group['predicted_label'].tolist())
             probs_list = [self._normalize_dict_probs(self._safe_literal_eval(r.get('final_probs', {})), all_labels_list) for r in rows]
             mean_probs = {k: float(np.mean([p[k] for p in probs_list])) if probs_list else 0.0 for k in all_labels_list}
             std_probs = {k: float(np.std([p[k] for p in probs_list])) if probs_list else 0.0 for k in all_labels_list}
 
+            predicted_probability_ensemble_paciente = float(final_probs.get(pred_patient, np.nan)) if isinstance(final_probs, dict) else np.nan
+            prob_mean_winner_paciente = float(mean_probs.get(pred_patient, np.nan)) if mean_probs else np.nan
+            prob_std_winner_paciente = float(std_probs.get(pred_patient, np.nan)) if std_probs else np.nan
+
+            mean_orig_stddev_tiles = np.nan
+            if 'probability_std_dev' in combined.columns:
+                try:
+                    mean_orig_stddev_tiles = float(combined[combined['patient_id'] == pid]['probability_std_dev'].mean())
+                except Exception:
+                    mean_orig_stddev_tiles = np.nan
+
             results.append({
                 'patient_id': pid,
                 'true_label': true_label,
-                'predicted_label': pred,
-                'voto_majoritario_simples_paciente': pred,
-                'final_probs': final_probs,
-                'voto_majoritario_simples_imagens': self._majority_vote(group['predicted_label'].tolist()),
-                'distribuicao_votos_simples_imagens': dict(votos),
+                'voto_majoritario_simples_paciente': votos_imgs.most_common(1)[0][0] if votos_imgs else np.nan,
+                'distribuicao_votos_simples_paciente': dict(votos_imgs),
+                'predicted_label_ensemble_paciente': pred_patient,
+                'predicted_probability_ensemble_paciente': predicted_probability_ensemble_paciente,
                 'mean_probs_per_class_paciente': mean_probs,
                 'std_probs_per_class_paciente': std_probs,
+                'predicted_probability_mean_winner_paciente': prob_mean_winner_paciente,
+                'predicted_probability_std_winner_paciente': prob_std_winner_paciente,
+                'mean_probability_std_dev_original_tiles': mean_orig_stddev_tiles,
+                # compatibilidade
+                'predicted_label': pred_patient,
+                'final_probs': final_probs,
             })
 
-        final_df = pd.DataFrame(results).set_index('patient_id')
+        final_df = pd.DataFrame(results)
 
         if self.ENSEMBLE_TYPE == 'weighted':
             csv_name = f"ensemble_per_patient_weighted_{self.WEIGHT_METRIC}.csv"
@@ -441,7 +508,7 @@ class PerModelEnsembler:
         out_dir = os.path.join(self.save_output_base, subfolder)
         os.makedirs(out_dir, exist_ok=True)
         csv_path = os.path.join(out_dir, csv_name)
-        final_df.to_csv(csv_path, index=True)
+        final_df.to_csv(csv_path, index=False)
 
         df_clean = final_df.dropna(subset=['true_label', 'predicted_label'])
         metrics_path = os.path.join(out_dir, metrics_name)
@@ -470,16 +537,22 @@ class PerModelEnsembler:
         y_pred = df_clean['predicted_label']
 
         # preparar scores para ROC-AUC
-        if 'final_probs' in df_clean.columns and df_clean['final_probs'].notna().any():
+        prob_dict_cols = [
+            'final_probs',
+            'mean_probs_per_class_tile',
+            'mean_probs_per_class_image',
+            'mean_probs_per_class_paciente',
+            'mean_probs_per_class',
+        ]
+        probs_col = None
+        for c in prob_dict_cols:
+            if c in df_clean.columns and df_clean[c].notna().any():
+                probs_col = c
+                break
+        if probs_col is not None:
             y_scores = [
                 [row.get(cls, 0.0) for cls in all_labels_list]
-                for row in df_clean['final_probs'].fillna({}).tolist()
-            ]
-            y_scores = np.array(y_scores)
-        elif 'mean_probs_per_class' in df_clean.columns and df_clean['mean_probs_per_class'].notna().any():
-            y_scores = [
-                [row.get(cls, 0.0) for cls in all_labels_list]
-                for row in df_clean['mean_probs_per_class'].fillna({}).tolist()
+                for row in df_clean[probs_col].fillna({}).tolist()
             ]
             y_scores = np.array(y_scores)
         else:
