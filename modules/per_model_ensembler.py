@@ -61,6 +61,12 @@ class PerModelEnsembler:
         self.save_output_base = save_output_base or default_base
         os.makedirs(self.save_output_base, exist_ok=True)
 
+        # Cache interno para evitar recomputar níveis
+        self._cache_tile_df: Optional[pd.DataFrame] = None
+        self._cache_tile_csv: Optional[str] = None
+        self._cache_img_df: Optional[pd.DataFrame] = None
+        self._cache_img_csv: Optional[str] = None
+
     # ------------------------------
     # Helpers
     # ------------------------------
@@ -323,6 +329,9 @@ class PerModelEnsembler:
         os.makedirs(out_dir, exist_ok=True)
         csv_path = os.path.join(out_dir, csv_name)
         final_df.to_csv(csv_path, index=False)
+        # Atualiza cache
+        self._cache_tile_df = final_df.copy()
+        self._cache_tile_csv = csv_path
 
         df_clean = final_df.dropna(subset=['true_label', 'predicted_label'])
         metrics_path = os.path.join(out_dir, metrics_name)
@@ -334,9 +343,14 @@ class PerModelEnsembler:
     # Image level
     # ------------------------------
     def run_image_level(self, csv_paths: List[str]) -> Tuple[str, str]:
-        # primeiro gera o nível de tile
-        tile_csv, _ = self.run_tile_level(csv_paths)
-        tile_df = pd.read_csv(tile_csv)
+        # Usa cache de tiles se disponível; caso contrário, gera uma vez
+        if self._cache_tile_df is None:
+            tile_csv, _ = self.run_tile_level(csv_paths)
+            tile_df = pd.read_csv(tile_csv)
+            self._cache_tile_df = tile_df.copy()
+            self._cache_tile_csv = tile_csv
+        else:
+            tile_df = self._cache_tile_df.copy()
         # Descobrir labels
         all_labels = set(tile_df['true_label'].dropna().unique().tolist()) | set(tile_df['predicted_label'].dropna().unique().tolist())
         # também considerar chaves de probabilidade
@@ -419,6 +433,9 @@ class PerModelEnsembler:
         os.makedirs(out_dir, exist_ok=True)
         csv_path = os.path.join(out_dir, csv_name)
         final_df.to_csv(csv_path, index=False)
+        # Atualiza cache de imagem
+        self._cache_img_df = final_df.copy()
+        self._cache_img_csv = csv_path
 
         df_clean = final_df.dropna(subset=['true_label', 'predicted_label'])
         metrics_path = os.path.join(out_dir, metrics_name)
@@ -430,9 +447,14 @@ class PerModelEnsembler:
     # Patient level
     # ------------------------------
     def run_patient_level(self, csv_paths: List[str]) -> Tuple[str, str]:
-        # Gera nível de tile e imagem antes (garante consistência)
-        img_csv, _ = self.run_image_level(csv_paths)
-        img_df = pd.read_csv(img_csv)
+        # Usa cache de imagem se disponível; caso contrário, gera uma vez
+        if self._cache_img_df is None:
+            img_csv, _ = self.run_image_level(csv_paths)
+            img_df = pd.read_csv(img_csv)
+            self._cache_img_df = img_df.copy()
+            self._cache_img_csv = img_csv
+        else:
+            img_df = self._cache_img_df.copy()
 
         all_labels = set(img_df['true_label'].dropna().unique().tolist()) | set(img_df['predicted_label'].dropna().unique().tolist())
         for d in img_df['final_probs'].dropna():

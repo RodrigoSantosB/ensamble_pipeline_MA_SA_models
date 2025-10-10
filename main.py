@@ -18,6 +18,9 @@ except Exception:
     _HAS_MPL = False
 
 from modules import BetweenModelsEnsembler, PerModelEnsembler
+from modules.runner_sa import run_sa_pipeline
+from modules.flags import GENERATE_LEVELS, GENERATE_PLOTS_FOR, ROC_DETAIL
+from modules.utils import plot_roc_from_csv, save_confusion_and_report_from_csv
 
 
 def resolve_paths() -> tuple[str, str]:
@@ -148,35 +151,45 @@ def check_sa_ready(tables_dir: str, model: str, ensemble_type: str, weight_metri
 
 
 def ensure_sa_outputs(models: List[str], ensemble_type: str, weight_metric: str) -> List[str]:
+    """Garante que os artefatos de SA existem para os modelos.
+    Usa paralelização via runner_sa para modelos que ainda não estão prontos.
+    """
     tables_dir, _ = resolve_paths_outputs()
     models_ready: List[str] = []
+    to_generate_cfgs = []
+
     for m in models:
-        ok, status = check_sa_ready(tables_dir, m, ensemble_type, weight_metric)
+        ok, _ = check_sa_ready(tables_dir, m, ensemble_type, weight_metric)
         if ok:
             models_ready.append(m)
             continue
-        # Tentar gerar SA para este modelo
+        # Descobrir CSVs de folds
         csvs = discover_model_csvs(m)
         if not csvs:
             print(f"[AVISO] Não encontrei CSVs de folds para o modelo {m}. Pulando este modelo no MA.")
             continue
-        print(f"[INFO] Gerando ensembles SA para {m} ({ensemble_type})...")
-        per = PerModelEnsembler(model_name=m, ensemble_type=ensemble_type, weight_metric=weight_metric)
-        try:
-            per.run_tile_level(csvs)
-            per.run_image_level(csvs)
-            per.run_patient_level(csvs)
-        except Exception as e:
-            print(f"[ERRO] Falha ao gerar SA para {m}: {e}")
-            continue
-        # verificar novamente
+        save_base = os.path.join(tables_dir, m)
+        to_generate_cfgs.append({
+            'model_name': m,
+            'ensemble_type': 'weighted' if ensemble_type == 'weighted' else ensemble_type,
+            'csv_paths': csvs,
+            'save_output_base': save_base,
+        })
+
+    # Rodar SA em paralelo para os modelos pendentes
+    if to_generate_cfgs:
+        print(f"[INFO] Gerando ensembles SA em paralelo para {len(to_generate_cfgs)} modelo(s)...")
+        _ = run_sa_pipeline(to_generate_cfgs)
+
+    # Verificar novamente e exportar
+    for m in models:
         ok2, _ = check_sa_ready(tables_dir, m, ensemble_type, weight_metric)
         if ok2:
             models_ready.append(m)
-            # exportar para results imediatamente
             export_sa_to_results(tables_dir, m, ensemble_type, weight_metric)
         else:
             print(f"[AVISO] SA incompleto para {m}, não será incluído no MA.")
+
     return models_ready
 
 
@@ -186,34 +199,7 @@ def ensure_sa_outputs(models: List[str], ensemble_type: str, weight_metric: str)
 def _type_folder_name(ensemble_type: str, weight_metric: str) -> str:
     return f"weighted_{weight_metric}" if ensemble_type == 'weighted' else ensemble_type
 
-def _save_confusion_matrix_png(metrics_json_path: str, labels: List[str], png_out_dir: str) -> None:
-    if not _HAS_MPL:
-        return
-    try:
-        with open(metrics_json_path, 'r') as f:
-            m = json.load(f)
-        cm = m.get('confusion_matrix')
-        if not isinstance(cm, list):
-            return
-        cm_arr = np.array(cm)
-        os.makedirs(png_out_dir, exist_ok=True)
-        fig, ax = plt.subplots(figsize=(6, 6))
-        im = ax.imshow(cm_arr, cmap='Blues')
-        ax.set_xticks(range(len(labels)))
-        ax.set_yticks(range(len(labels)))
-        ax.set_xticklabels(labels, rotation=45, ha='right')
-        ax.set_yticklabels(labels)
-        ax.set_xlabel('Predicted')
-        ax.set_ylabel('True')
-        fig.colorbar(im, ax=ax)
-        for i in range(cm_arr.shape[0]):
-            for j in range(cm_arr.shape[1]):
-                ax.text(j, i, int(cm_arr[i, j]), ha='center', va='center', color='black')
-        plt.tight_layout()
-        fig.savefig(os.path.join(png_out_dir, 'confusion_matrix.png'))
-        plt.close(fig)
-    except Exception:
-        pass
+# Removido: usamos utils.save_confusion_and_report_from_csv para gráficos
 
 def _safe_literal_eval(x):
     try:
@@ -221,96 +207,7 @@ def _safe_literal_eval(x):
     except Exception:
         return {}
 
-def _plot_roc_pr_per_class(csv_path: str, out_dir: str) -> None:
-    """Gera gráficos ROC e Precision-Recall por classe a partir de um CSV de ensemble.
-    Procura colunas de probabilidades conhecidas e usa true_label como referência.
-    """
-    if not (_HAS_MPL and _HAS_SKLEARN):
-        return
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception:
-        return
-
-    # Colunas candidatas que podem conter dict de probabilidades por classe
-    prob_cols = [
-        'final_probs',
-        'mean_probs_per_class',
-        'mean_probs_per_class_image',
-        'mean_probs_per_class_tile',
-        'probabilities',
-    ]
-    probs_col = None
-    for c in prob_cols:
-        if c in df.columns:
-            probs_col = c
-            break
-    if probs_col is None:
-        # Sem probabilidades, não gera curvas
-        return
-
-    # Converter eventuais strings em dict
-    df[probs_col] = df[probs_col].apply(lambda v: v if isinstance(v, dict) else _safe_literal_eval(v))
-    if df[probs_col].isna().all():
-        return
-
-    # Descobrir lista de classes
-    labels_set = set()
-    for d in df[probs_col].dropna():
-        if isinstance(d, dict):
-            labels_set.update(d.keys())
-    # também incluir labels verdadeiros caso não apareçam nas probs
-    if 'true_label' in df.columns:
-        labels_set.update(df['true_label'].dropna().unique().tolist())
-    labels_list = sorted(list(labels_set))
-    if not labels_list:
-        return
-
-    os.makedirs(out_dir, exist_ok=True)
-
-    # Para cada classe, calcular ROC e PR
-    for cls in labels_list:
-        try:
-            # binarizar y_true
-            y_true = (df['true_label'] == cls).astype(int)
-            # score da classe
-            y_score = df[probs_col].apply(lambda d: float(d.get(cls, 0.0)) if isinstance(d, dict) else 0.0).astype(float)
-
-            # Ignorar se não há positivos ou variação
-            if y_true.sum() == 0 or y_true.nunique() < 2:
-                continue
-
-            # ROC
-            fpr, tpr, _ = roc_curve(y_true, y_score)
-            roc_auc = auc(fpr, tpr)
-            fig, ax = plt.subplots(figsize=(6, 5))
-            ax.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.3f})')
-            ax.plot([0, 1], [0, 1], color='navy', lw=1, linestyle='--')
-            ax.set_xlim([0.0, 1.0])
-            ax.set_ylim([0.0, 1.05])
-            ax.set_xlabel('False Positive Rate')
-            ax.set_ylabel('True Positive Rate')
-            ax.set_title(f'ROC - Classe {cls}')
-            ax.legend(loc='lower right')
-            plt.tight_layout()
-            fig.savefig(os.path.join(out_dir, f'roc_{cls}.png'))
-            plt.close(fig)
-
-            # Precision-Recall
-            precision, recall, _ = precision_recall_curve(y_true, y_score)
-            fig2, ax2 = plt.subplots(figsize=(6, 5))
-            ax2.plot(recall, precision, color='green', lw=2)
-            ax2.set_xlim([0.0, 1.0])
-            ax2.set_ylim([0.0, 1.05])
-            ax2.set_xlabel('Recall')
-            ax2.set_ylabel('Precision')
-            ax2.set_title(f'Precision-Recall - Classe {cls}')
-            plt.tight_layout()
-            fig2.savefig(os.path.join(out_dir, f'pr_{cls}.png'))
-            plt.close(fig2)
-        except Exception:
-            # evitar que falhas em uma classe interrompam o processo
-            continue
+# Removido: usamos utils.plot_roc_from_csv para curvas ROC seguindo template
 
 def export_sa_to_results(tables_dir: str, model: str, ensemble_type: str, weight_metric: str) -> None:
     """Copia artefatos SA para results/SA/<MODEL>/<tipo>/<Level> e gera PNG de matriz de confusão."""
@@ -333,20 +230,17 @@ def export_sa_to_results(tables_dir: str, model: str, ensemble_type: str, weight
         os.makedirs(out_dir, exist_ok=True)
         shutil.copy2(csv_src, os.path.join(out_dir, os.path.basename(csv_src)))
         shutil.copy2(met_src, os.path.join(out_dir, os.path.basename(met_src)))
-        # tentar inferir labels do JSON
-        try:
-            with open(met_src, 'r') as f:
-                m = json.load(f)
-            report = m.get('classification_report', {})
-            labels = [k for k in report.keys() if k not in ('accuracy', 'macro avg', 'weighted avg')]
-            _save_confusion_matrix_png(met_src, labels, out_dir)
-        except Exception:
-            pass
-        # gerar ROC/PR por classe
-        try:
-            _plot_roc_pr_per_class(csv_src, out_dir)
-        except Exception:
-            pass
+        # Gráficos seguindo template (utils)
+        lvl = level.lower()
+        if ensemble_type in GENERATE_PLOTS_FOR:
+            try:
+                plot_roc_from_csv(csv_src, ensemble_type, out_dir, level=lvl, network=model, detail=ROC_DETAIL)
+            except Exception:
+                pass
+            try:
+                save_confusion_and_report_from_csv(csv_src, out_dir, level=lvl, network=model)
+            except Exception:
+                pass
 
 def export_ma_to_results(ensemble_type: str, weight_metric: str, level: str, csv_path: str, metrics_path: str) -> None:
     """Copia artefatos MA para results/MA/<tipo>/<Level> e gera PNG de matriz de confusão."""
@@ -358,20 +252,17 @@ def export_ma_to_results(ensemble_type: str, weight_metric: str, level: str, csv
         shutil.copy2(csv_path, os.path.join(out_dir, os.path.basename(csv_path)))
     if os.path.exists(metrics_path):
         shutil.copy2(metrics_path, os.path.join(out_dir, os.path.basename(metrics_path)))
-        # tentar inferir labels para PNG
+    # Gráficos seguindo template (utils)
+    lvl = level.lower()
+    if ensemble_type in GENERATE_PLOTS_FOR and os.path.exists(csv_path):
         try:
-            with open(metrics_path, 'r') as f:
-                m = json.load(f)
-            report = m.get('classification_report', {})
-            labels = [k for k in report.keys() if k not in ('accuracy', 'macro avg', 'weighted avg')]
-            _save_confusion_matrix_png(metrics_path, labels, out_dir)
+            plot_roc_from_csv(csv_path, ensemble_type, out_dir, level=lvl, network='MA', detail=ROC_DETAIL)
         except Exception:
             pass
-    # gerar ROC/PR por classe
-    try:
-        _plot_roc_pr_per_class(csv_path, out_dir)
-    except Exception:
-        pass
+        try:
+            save_confusion_and_report_from_csv(csv_path, out_dir, level=lvl, network='MA')
+        except Exception:
+            pass
 
 
 def run_between_models(models: List[str], ensemble_type: str, weight_metric: str) -> None:
