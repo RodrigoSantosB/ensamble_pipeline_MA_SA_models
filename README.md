@@ -5,7 +5,7 @@ Este documento explica como usar o pipeline de ensemble por modelo (SA) e entre 
 ## Visão Geral
 - SA (per-model ensemble): combina predições de múltiplos folds/execuções do MESMO modelo para gerar artefatos nos níveis tile, imagem e paciente.
 - MA (between-models ensemble): combina os artefatos dos modelos (já consolidados via SA) para produzir resultados agregados entre arquiteturas.
-- Gráficos (ROC, matriz de confusão, classification report) são gerados seguindo o estilo de `all_metrics_generate.py` e ficam copiados em `outputs/results/...`.
+- Gráficos (ROC, matriz de confusão, classification report) são gerados e ficam copiados em `outputs/results/...`.
 
 ## Estrutura do Projeto (diagrama)
 ```
