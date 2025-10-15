@@ -51,6 +51,19 @@ class PerModelEnsembler:
         weight_metric: str = "f1_macro",
         save_output_base: Optional[str] = None,
     ) -> None:
+        """Inicializa o orquestrador de ensemble por modelo.
+
+        Args:
+            model_name: Nome do modelo base (usado para estruturar saídas).
+            ensemble_type: Tipo de ensemble ("hard_voting", "soft_voting" ou "weighted").
+            weight_metric: Métrica para ponderação quando `ensemble_type` é "weighted"
+                ("accuracy", "f1_macro", "recall_weighted", "roc_auc_ovr").
+            save_output_base: Caminho base onde salvar artefatos e métricas. Se não
+                informado, usa `outputs/tables/{model_name}`.
+
+        Returns:
+            None. Configura atributos internos e garante diretórios de saída.
+        """
         self.model_name = model_name
         self.ENSEMBLE_TYPE = ensemble_type
         self.WEIGHT_METRIC = weight_metric
@@ -72,6 +85,18 @@ class PerModelEnsembler:
     # ------------------------------
     @staticmethod
     def _safe_literal_eval(x: Any) -> Any:
+        """Converte strings literais em objetos Python de forma segura.
+
+        Se `x` já é `dict` ou `list`, retorna o próprio valor. Para valores
+        nulos/NaN retorna `{}`. Caso a conversão falhe, retorna `{}`.
+
+        Args:
+            x: Valor de entrada que pode ser um `dict`, `list`, string ou outro tipo.
+
+        Returns:
+            Objeto convertido quando possível (por exemplo, `dict`), ou `{}` em caso
+            de erro/NaN.
+        """
         if isinstance(x, (dict, list)):
             return x
         if pd.isna(x):
@@ -83,6 +108,14 @@ class PerModelEnsembler:
 
     @staticmethod
     def _majority_vote(labels: List[str]) -> Any:
+        """Aplica votação majoritária simples sobre uma lista de rótulos.
+
+        Args:
+            labels: Lista de rótulos previstos.
+
+        Returns:
+            O rótulo mais frequente na lista ou `np.nan` se a lista estiver vazia.
+        """
         if not labels:
             return np.nan
         c = Counter(labels)
@@ -90,6 +123,19 @@ class PerModelEnsembler:
 
     @staticmethod
     def _normalize_dict_probs(d: Dict[str, float], all_labels: List[str]) -> Dict[str, float]:
+        """Normaliza um dicionário de probabilidades para conter todas as classes.
+
+        Garante que todas as classes em `all_labels` estejam presentes como chaves
+        no dicionário e normaliza os valores para somarem 1 (se a soma original for
+        maior que 0).
+
+        Args:
+            d: Dicionário com probabilidades por classe.
+            all_labels: Lista com todas as classes esperadas.
+
+        Returns:
+            Dicionário de probabilidades contendo todas as classes e normalizado.
+        """
         out: Dict[str, float] = {k: float(d.get(k, 0.0)) for k in all_labels}
         s = sum(out.values())
         if s > 0:
@@ -98,6 +144,20 @@ class PerModelEnsembler:
         return out
 
     def _soft_voting_probs(self, rows: List[Dict[str, Any]], probs_key: str, all_labels: List[str]) -> Dict[str, float]:
+        """Agrega probabilidades por média (soft voting).
+
+        Para cada linha, extrai o dicionário de probabilidades indicado por
+        `probs_key`, normaliza pelas classes em `all_labels` e calcula a média
+        por classe.
+
+        Args:
+            rows: Lista de linhas (dicts) a agregar.
+            probs_key: Nome da chave/coluna que contém o dicionário de probabilidades.
+            all_labels: Lista de todas as classes.
+
+        Returns:
+            Dicionário com probabilidades médias por classe.
+        """
         acc: Dict[str, float] = {k: 0.0 for k in all_labels}
         n = 0
         for row in rows:
@@ -110,6 +170,22 @@ class PerModelEnsembler:
         return {k: acc[k] / n for k in all_labels}
 
     def _weighted_voting_probs(self, rows: List[Dict[str, Any]], probs_key: str, all_labels: List[str], weights: Dict[str, float], fold_key: str) -> Dict[str, float]:
+        """Agrega probabilidades ponderadas (weighted voting).
+
+        Soma ponderada das probabilidades normalizadas por classe, usando como
+        pesos `weights` indexados por `fold_key` presente em cada linha.
+
+        Args:
+            rows: Lista de linhas (dicts) a agregar.
+            probs_key: Chave/coluna com o dicionário de probabilidades.
+            all_labels: Lista de todas as classes.
+            weights: Dicionário de pesos por fold (ou outro identificador).
+            fold_key: Chave do dict `row` que identifica o fold (ou grupo) usado
+                para buscar o peso em `weights`.
+
+        Returns:
+            Dicionário com soma ponderada das probabilidades por classe.
+        """
         acc: Dict[str, float] = {k: 0.0 for k in all_labels}
         for row in rows:
             fold = row.get(fold_key)
@@ -121,6 +197,20 @@ class PerModelEnsembler:
 
     @staticmethod
     def _standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """Normaliza nomes de colunas e extrai identificadores a partir de `image_path`.
+
+        - Renomeia colunas comuns para o esquema canônico (`patient_id`, `image_id`,
+          `tile_name`, `true_label`, `predicted_label`, `probabilities`).
+        - Quando disponível, usa `image_path` para inferir `patient_id`, `image_id`
+          e `tile_name`.
+        - Garante a existência das colunas mínimas, criando-as quando ausentes.
+
+        Args:
+            df: DataFrame de entrada a ser padronizado.
+
+        Returns:
+            DataFrame com colunas normalizadas e mínimas garantidas.
+        """
         # Garante colunas mínimas e normaliza nomes comuns
         col_map = {
             'Paciente': 'patient_id',
@@ -169,6 +259,22 @@ class PerModelEnsembler:
     # Carregar CSVs (um por fold) e consolidar
     # ------------------------------
     def _load_folds(self, csv_paths: List[str]) -> Tuple[pd.DataFrame, List[str]]:
+        """Carrega e consolida CSVs de diferentes folds do mesmo modelo.
+
+        - Padroniza colunas e garante tipo `dict` em `probabilities`.
+        - Adiciona a coluna `fold_name` com o nome do arquivo base.
+
+        Args:
+            csv_paths: Lista de caminhos para CSVs (um por fold/variação do modelo).
+
+        Returns:
+            Tupla contendo:
+            - DataFrame consolidado com todas as linhas.
+            - Lista com os nomes dos folds utilizados.
+
+        Raises:
+            RuntimeError: Se nenhum CSV válido for carregado.
+        """
         frames: List[pd.DataFrame] = []
         fold_names: List[str] = []
         for p in csv_paths:
@@ -193,6 +299,23 @@ class PerModelEnsembler:
     # Cálculo de pesos por fold
     # ------------------------------
     def _compute_fold_weights(self, combined: pd.DataFrame, fold_names: List[str], all_labels_list: List[str]) -> Dict[str, float]:
+        """Calcula pesos por fold com base na métrica configurada.
+
+        Para cada fold, calcula `accuracy`, `f1_macro`, `recall_weighted` e
+        `roc_auc_ovr` (quando aplicável). Em seguida, normaliza os pesos
+        conforme `self.WEIGHT_METRIC`.
+
+        Args:
+            combined: DataFrame consolidado contendo a coluna `fold_name`.
+            fold_names: Lista com os nomes dos folds presentes.
+            all_labels_list: Lista ordenada com todas as classes observadas.
+
+        Returns:
+            Dicionário de pesos por fold, normalizados.
+
+        Notes:
+            Em casos sem dados válidos, utiliza pesos uniformes e emite um aviso.
+        """
         metrics_by_fold: Dict[str, Dict[str, float]] = {}
         for fold in fold_names:
             dff = combined[combined['fold_name'] == fold]
@@ -245,6 +368,23 @@ class PerModelEnsembler:
     # Tile level
     # ------------------------------
     def run_tile_level(self, csv_paths: List[str]) -> Tuple[str, str]:
+        """Executa o ensemble no nível de tile para um modelo.
+
+        - Carrega os CSVs de entrada (um por fold) e, se `weighted`, calcula pesos.
+        - Agrupa por `(patient_id, tile_name)` e combina previsões conforme o tipo
+          de ensemble escolhido.
+        - Salva o CSV de saída e um JSON com métricas globais.
+
+        Args:
+            csv_paths: Lista de caminhos para CSVs correspondentes aos folds do
+                mesmo modelo.
+
+        Returns:
+            Tupla com `(csv_path, metrics_path)` referentes aos artefatos gerados.
+
+        Raises:
+            ValueError: Se `self.ENSEMBLE_TYPE` for desconhecido.
+        """
         combined, fold_names = self._load_folds(csv_paths)
         # labels presentes
         all_labels = set(combined['true_label'].dropna().unique().tolist()) | set(combined['predicted_label'].dropna().unique().tolist())
@@ -343,6 +483,21 @@ class PerModelEnsembler:
     # Image level
     # ------------------------------
     def run_image_level(self, csv_paths: List[str]) -> Tuple[str, str]:
+        """Executa o ensemble no nível de imagem para um modelo.
+
+        - Reutiliza o cache de tiles quando disponível ou o computa on-the-fly.
+        - Agrega por `patient_id`, combinando previsões conforme o tipo de ensemble.
+        - Salva CSV e métricas globais compatíveis com o pipeline SA.
+
+        Args:
+            csv_paths: Lista de caminhos para CSVs dos folds do modelo.
+
+        Returns:
+            Tupla `(csv_path, metrics_path)` para os artefatos salvos.
+
+        Raises:
+            ValueError: Se `self.ENSEMBLE_TYPE` for desconhecido.
+        """
         # Usa cache de tiles se disponível; caso contrário, gera uma vez
         if self._cache_tile_df is None:
             tile_csv, _ = self.run_tile_level(csv_paths)
@@ -447,6 +602,21 @@ class PerModelEnsembler:
     # Patient level
     # ------------------------------
     def run_patient_level(self, csv_paths: List[str]) -> Tuple[str, str]:
+        """Executa o ensemble no nível de paciente para um modelo.
+
+        - Reutiliza o cache de imagens quando disponível ou o computa on-the-fly.
+        - Agrega por `patient_id`, combinando previsões conforme o tipo de ensemble.
+        - Salva CSV e métricas globais compatíveis com o pipeline SA.
+
+        Args:
+            csv_paths: Lista de caminhos para CSVs dos folds do modelo.
+
+        Returns:
+            Tupla `(csv_path, metrics_path)` para os artefatos salvos.
+
+        Raises:
+            ValueError: Se `self.ENSEMBLE_TYPE` for desconhecido.
+        """
         # Usa cache de imagem se disponível; caso contrário, gera uma vez
         if self._cache_img_df is None:
             img_csv, _ = self.run_image_level(csv_paths)
@@ -550,6 +720,25 @@ class PerModelEnsembler:
         level_key: str,
         model_weights: Dict[str, float] | None = None,
     ) -> None:
+        """Calcula e salva métricas globais em JSON.
+
+        - Calcula `accuracy`, `f1_macro`, `recall_weighted` e, quando possível,
+          `roc_auc_ovr` com base em probabilidades disponíveis.
+        - Inclui no JSON o total de amostras (`level_key`) e, opcionalmente,
+          os pesos usados por fold (`model_weights`).
+
+        Args:
+            df_clean: DataFrame com colunas `true_label` e `predicted_label` sem NaN.
+            all_labels_list: Lista ordenada com todas as classes para compor `y_scores`.
+            label_to_int: Mapa de rótulos para índices inteiros (para ROC-AUC).
+            metrics_path: Caminho de saída para o arquivo JSON de métricas.
+            level_key: Nome da chave que representa o total de amostras do nível
+                (por exemplo, `total_tiles_predicted`, `total_images_predicted`).
+            model_weights: Pesos usados no ensemble (quando `weighted`).
+
+        Returns:
+            None. Escreve um arquivo JSON com as métricas calculadas.
+        """
         if df_clean.empty:
             with open(metrics_path, 'w') as f:
                 json.dump({level_key: 0, 'warning': 'No valid samples for metrics.'}, f, indent=4)

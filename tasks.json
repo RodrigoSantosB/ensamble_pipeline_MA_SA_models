@@ -1,0 +1,53 @@
+[
+    {
+        "model_name": "EFFNet",
+        "ensemble_type": "soft_voting",
+        "weight_metric": "f1_macro",
+        "csv_paths": [
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_effnet\\0903-102424_EFF-NET_fold0_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_effnet\\0903-102424_EFF-NET_fold1_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_effnet\\0903-102424_EFF-NET_fold2_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_effnet\\0903-102424_EFF-NET_fold3_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_effnet\\0903-102424_EFF-NET_fold4_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_effnet\\0903-102424_EFF-NET_fold5_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_effnet\\0903-102424_EFF-NET_fold6_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_effnet\\0903-102424_EFF-NET_fold7_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_effnet\\0903-102424_EFF-NET_fold8_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_effnet\\0903-102424_EFF-NET_fold9_results.csv"
+        ]
+    },
+    {
+        "model_name": "GGNet",
+        "ensemble_type": "soft_voting",
+        "weight_metric": "f1_macro",
+        "csv_paths": [
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_ggnet\\0710-161214_GoogleNet_fold0_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_ggnet\\0710-161214_GoogleNet_fold1_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_ggnet\\0710-161214_GoogleNet_fold2_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_ggnet\\0710-161214_GoogleNet_fold3_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_ggnet\\0710-161214_GoogleNet_fold4_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_ggnet\\0710-161214_GoogleNet_fold5_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_ggnet\\0710-161214_GoogleNet_fold6_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_ggnet\\0710-161214_GoogleNet_fold7_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_ggnet\\0710-161214_GoogleNet_fold8_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_ggnet\\0710-161214_GoogleNet_fold9_results.csv"
+        ]
+    },
+    {
+        "model_name": "MOBNet",
+        "ensemble_type": "soft_voting",
+        "weight_metric": "f1_macro",
+        "csv_paths": [
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_mobnet\\0707-213643_MobileNetV2_fold0_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_mobnet\\0707-213643_MobileNetV2_fold1_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_mobnet\\0707-213643_MobileNetV2_fold2_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_mobnet\\0707-213643_MobileNetV2_fold3_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_mobnet\\0707-213643_MobileNetV2_fold4_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_mobnet\\0707-213643_MobileNetV2_fold5_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_mobnet\\0707-213643_MobileNetV2_fold6_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_mobnet\\0707-213643_MobileNetV2_fold7_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_mobnet\\0707-213643_MobileNetV2_fold8_results.csv",
+            "c:\\Users\\Fernando Alves\\Desktop\\Nova pasta\\ensamble_pipeline_MA_SA_models\\datas\\summary_results_mobnet\\0707-213643_MobileNetV2_fold9_results.csv"
+        ]
+    }
+]

@@ -1,13 +1,22 @@
+"""Utilitários de descoberta, caminhos, logging e agregação (paciente).
+
+Inclui helpers para:
+- Conversão segura de strings para dicionários;
+- Logging com timestamp;
+- Resolução de caminhos em `datas/` e `outputs/`;
+- Descoberta dinâmica de modelos e seus CSVs;
+- Geração direta de tabela em nível de paciente (SA/MA) com hard/soft/weighted.
+"""
 import os
-import json
 import ast
-from typing import List
+import glob
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from typing import List, Dict, Optional
 from itertools import cycle
 from sklearn.preprocessing import label_binarize
 from sklearn.metrics import (
@@ -19,8 +28,20 @@ from sklearn.metrics import (
 )
 
 
+
 def safe_convert_to_dict(value):
-    """Converte string representando dict para dict real; retorna {} em caso de falha."""
+    """Converte uma string representando dict para um dict real.
+
+    Usa `ast.literal_eval` para parsing seguro. Caso falhe ou o valor não
+    seja um mapeamento válido, retorna um dicionário vazio.
+
+    Args:
+        value: Valor a ser convertido. Pode ser `dict` ou `str` com a
+            representação de um dict.
+
+    Returns:
+        dict: Dicionário equivalente ou `{}` em caso de falha.
+    """
     if isinstance(value, dict):
         return value
     try:
@@ -29,190 +50,184 @@ def safe_convert_to_dict(value):
         return {}
 
 
-def save_confusion_and_report_from_metrics(metrics_json_path: str, out_dir: str, level: str, network: str = '') -> None:
-    """Gera PNGs de matriz de confusão e classification report a partir do JSON de métricas.
-    Estilo inspirado em all_metrics_generate.py (seaborn heatmap)."""
-    try:
-        with open(metrics_json_path, 'r') as f:
-            m = json.load(f)
-    except Exception:
-        return
-
-    classes = m.get('classes')
-    cm = m.get('confusion_matrix')
-    report_dict = m.get('classification_report')
-    if not isinstance(classes, list) or not isinstance(cm, list) or not isinstance(report_dict, dict):
-        # fallback: inferir labels do relatório
-        report = m.get('classification_report', {})
-        classes = [k for k in report.keys() if k not in ('accuracy', 'macro avg', 'weighted avg')]
-        cm = m.get('confusion_matrix')
-        if not isinstance(cm, list) or not classes:
-            return
-
-    os.makedirs(out_dir, exist_ok=True)
-
-    # Confusion Matrix
-    plt.figure(figsize=(6, 5))
-    cm_arr = np.array(cm)
-    sns.heatmap(cm_arr, annot=True, fmt='d', cmap="Blues", xticklabels=classes, yticklabels=classes)
-    plt.title(f"Matriz de Confusão - {level.capitalize()} Level for {network}")
-    plt.xlabel("Predicted")
-    plt.ylabel("True")
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, f"confusion_matrix_model_{level}_level_ensemble.png"))
-    plt.close()
-
-    # Classification Report
-    try:
-        plt.figure(figsize=(8, 0.5 + 0.4 * len(classes)))
-        df_report = pd.DataFrame(report_dict).transpose().round(3)
-        sns.heatmap(df_report.iloc[:-1, :-1], annot=True, cmap="YlGnBu", fmt=".3f")
-        plt.title(f"Classification Report - {level.capitalize()} Level {network}")
-        plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, f"classification_report_model_{level}_level_ensemble.png"))
-        plt.close()
-    except Exception:
-        pass
-
-
-def save_confusion_and_report_from_csv(csv_path: str, out_dir: str, level: str, network: str = '') -> None:
-    """Gera matriz de confusão e classification report diretamente do CSV.
-    Usa colunas 'true_label' e 'predicted_label'."""
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception:
-        return
-    if 'true_label' not in df.columns or 'predicted_label' not in df.columns:
-        return
-    y_true = df['true_label'].tolist()
-    y_pred = df['predicted_label'].tolist()
-    labels = sorted(list(set(y_true)))
-    cm = confusion_matrix(y_true, y_pred, labels=labels)
-    os.makedirs(out_dir, exist_ok=True)
-
-    # Confusion Matrix
-    plt.figure(figsize=(6, 5))
-    sns.heatmap(cm, annot=True, fmt='d', cmap="Blues", xticklabels=labels, yticklabels=labels)
-    plt.title(f"Matriz de Confusão - {level.capitalize()} Level for {network}")
-    plt.xlabel("Predicted")
-    plt.ylabel("True")
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, f"confusion_matrix_model_{level}_level_ensemble.png"))
-    plt.close()
-
-    # Classification Report
-    try:
-        report_dict = classification_report(y_true, y_pred, labels=labels, output_dict=True)
-        plt.figure(figsize=(8, 0.5 + 0.4 * len(labels)))
-        df_report = pd.DataFrame(report_dict).transpose().round(3)
-        sns.heatmap(df_report.iloc[:-1, :-1], annot=True, cmap="YlGnBu", fmt=".3f")
-        plt.title(f"Classification Report - {level.capitalize()} Level {network}")
-        plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, f"classification_report_model_{level}_level_ensemble.png"))
-        plt.close()
-    except Exception:
-        pass
-
-
-def plot_roc_from_csv(csv_path: str, ensemble_method: str, out_dir: str, level: str, network: str = '', detail: str = 'per_class') -> None:
-    """Plota ROC a partir de um CSV seguindo o template de all_metrics_generate.py.
-    detail: 'per_class' para one-vs-rest por classe + micro; 'macro_micro' para apenas micro (e por classe compacta)."""
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception:
-        return
-
-    y_true = df['true_label'].tolist()
-    classes = sorted(list(set(y_true)))
-
-    if ensemble_method == 'hard_voting':
-        y_pred = df['predicted_label'].tolist()
-        y_probs = label_binarize(y_pred, classes=classes)
-    else:
-        prob_col_name_candidates = ['final_probs', f'mean_probs_per_class_{level}', 'mean_probs_per_class']
-        prob_col_name = None
-        for c in prob_col_name_candidates:
-            if c in df.columns:
-                prob_col_name = c
-                break
-        if prob_col_name is None:
-            return
-        df[prob_col_name] = df[prob_col_name].apply(safe_convert_to_dict)
-        for d in df[prob_col_name].dropna():
-            classes.extend([cls for cls in d.keys() if cls not in classes])
-        classes = sorted(list(set(classes)))
-        y_probs = np.array([[d.get(cls, 0.0) for cls in classes] for d in df[prob_col_name]])
-
-    y_true_bin = label_binarize(y_true, classes=classes)
-
-    # Micro-average ROC
-    try:
-        fpr_micro, tpr_micro, _ = roc_curve(y_true_bin.ravel(), y_probs.ravel())
-        roc_auc_micro = auc(fpr_micro, tpr_micro)
-    except Exception:
-        return
-
-    plt.figure(figsize=(6, 6))
-    plt.plot(fpr_micro, tpr_micro, label=f"Micro-average ROC (AUC = {roc_auc_micro:.2f})", color="deeppink", linestyle=":", linewidth=4)
-
-    if detail == 'per_class':
-        n_classes = len(classes)
-        colors = cycle(["aqua", "darkorange", "cornflowerblue", "green", "red", "purple"])
-        for i, color in zip(range(n_classes), colors):
-            try:
-                fpr_i, tpr_i, _ = roc_curve(y_true_bin[:, i], y_probs[:, i])
-                auc_i = auc(fpr_i, tpr_i)
-                plt.plot(fpr_i, tpr_i, color=color, lw=2, label=f"ROC {classes[i]} (AUC = {auc_i:.2f})")
-            except Exception:
-                continue
-
-    plt.plot([0, 1], [0, 1], "k--", lw=2)
-    plt.xlim([0, 1])
-    plt.ylim([0, 1.05])
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
-    plt.title(f"ROC Curve - {level.capitalize()} Level for {network} - {ensemble_method}")
-    plt.legend(loc="lower right")
-    plt.tight_layout()
-    os.makedirs(out_dir, exist_ok=True)
-    plt.savefig(os.path.join(out_dir, f"roc_curve_model_{level}_level_{ensemble_method}.png"))
-    plt.close()
-
-
-def run_in_parallel(callables_with_args: List[tuple], max_workers: int = 4, use_threads: bool = True):
-    """Executa uma lista de tarefas em paralelo. Cada item é (func, args_dict).
-    Retorna lista de resultados na mesma ordem. Ideal para Windows (threads por padrão)."""
-    results = []
-    if use_threads:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            future_to_idx = {ex.submit(func, **kwargs): i for i, (func, kwargs) in enumerate(callables_with_args)}
-            tmp = [None] * len(callables_with_args)
-            for fut in as_completed(future_to_idx):
-                idx = future_to_idx[fut]
-                try:
-                    tmp[idx] = fut.result()
-                except Exception as e:
-                    tmp[idx] = e
-            results = tmp
-    else:
-        from concurrent.futures import ProcessPoolExecutor, as_completed
-        with ProcessPoolExecutor(max_workers=max_workers) as ex:
-            future_to_idx = {ex.submit(func, **kwargs): i for i, (func, kwargs) in enumerate(callables_with_args)}
-            tmp = [None] * len(callables_with_args)
-            for fut in as_completed(future_to_idx):
-                idx = future_to_idx[fut]
-                try:
-                    tmp[idx] = fut.result()
-                except Exception as e:
-                    tmp[idx] = e
-            results = tmp
-    return results
-
 
 def log(msg):
-    """Função simples de log com timestamp."""
+    """Imprime uma mensagem com timestamp padronizado.
+
+    Args:
+        msg (str): Mensagem a ser exibida no log.
+
+    Returns:
+        None
+    """
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+
+
+def resolve_paths() -> tuple[str, str]:
+    """Resolve caminhos base para `tables` e subpasta de MA.
+
+    Returns:
+        tuple[str, str]: Par `(tables_dir, ensemble_output_base)` dentro do
+            diretório `tables`, garantindo existência de `Ensemble_Between_Models`.
+    """
+    root = os.path.dirname(os.path.abspath(__file__))
+    tables_dir = os.path.join(root, 'tables')
+    ensemble_output_base = os.path.join(tables_dir, 'Ensemble_Between_Models')
+    os.makedirs(ensemble_output_base, exist_ok=True)
+    return tables_dir, ensemble_output_base
+
+
+def resolve_datas_dir() -> str:
+    """Retorna o caminho absoluto para o diretório `datas/` na raiz do projeto.
+
+    Assume que `datas` está no mesmo nível do diretório `modules`.
+
+    Returns:
+        str: Caminho absoluto de `datas/`.
+    """
+    # 1. Pega o caminho do diretório onde o script atual está (ex: .../modules/)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # 2. Sobe um nível para o diretório pai (a raiz do projeto)
+    project_root = os.path.dirname(script_dir)
+    
+    # 3. Agora sim, junta o caminho da raiz do projeto com o nome da pasta 'datas'
+    datas_dir = os.path.join(project_root, 'datas')
+    
+    return datas_dir
+
+
+def ensure_datas_mirror() -> None:
+    """Espelha `notebooks/<summary_results_*>` em `datas/<summary_results_*>`.
+
+    Copia arquivos CSV das subpastas de `notebooks` esperadas para o
+    diretório `datas/`, criando subpastas quando necessário.
+
+    Returns:
+        None
+    """
+    root = os.path.dirname(os.path.abspath(__file__))
+    notebooks_dir = os.path.join(root, 'notebooks')
+    datas_dir = resolve_datas_dir()
+    for sub in set(MODEL_SUMMARY_DIRS.values()):
+        src_dir = os.path.join(notebooks_dir, sub)
+        dst_dir = os.path.join(datas_dir, sub)
+        if not os.path.isdir(src_dir):
+            continue
+        os.makedirs(dst_dir, exist_ok=True)
+        for csv_path in glob.glob(os.path.join(src_dir, '*.csv')):
+            try:
+                shutil.copy2(csv_path, os.path.join(dst_dir, os.path.basename(csv_path)))
+            except Exception:
+                pass
+
+
+
+
+def discover_models_and_paths(models_to_find: Optional[List[str]] = None) -> Dict[str, List[str]]:
+    """Descobre modelos e seus CSVs na pasta `datas/`.
+
+    Args:
+        models_to_find (Optional[List[str]]): Lista opcional de nomes de
+            modelos a priorizar. Se None, busca todos os `summary_results_*net`.
+
+    Raises:
+        FileNotFoundError: Se `datas/` não for encontrado.
+
+    Returns:
+        Dict[str, List[str]]: Mapeamento `model_name -> [csv_paths]`.
+    """
+    datas_dir = resolve_datas_dir()
+
+    if not os.path.isdir(datas_dir):
+        raise FileNotFoundError(
+            "A pasta 'datas' não foi encontrada. "
+            "Não há dados para rodar o ensemble."
+        )
+
+    model_dirs = []
+    if models_to_find:
+        # Modo 1: Usuário especificou quais modelos procurar
+        print(f"[INFO] Buscando modelos especificados: {models_to_find}")
+        for model_name in models_to_find:
+            # Constrói o nome do diretório esperado a partir do nome do modelo
+            # Ex: 'EFFNet' -> 'summary_results_effnet'
+            prefix = model_name.lower().replace('net', '')
+            dir_name = f"summary_results_{prefix}net"
+            full_path = os.path.join(datas_dir, dir_name)
+            
+            if os.path.isdir(full_path):
+                model_dirs.append(full_path)
+            else:
+                print(f"[AVISO] Diretório para o modelo '{model_name}' não encontrado em: {full_path}")
+    else:
+        # Modo 2: Comportamento original de autodescoberta
+        print("[INFO] Buscando todos os modelos disponíveis ('summary_results_*net')...")
+        model_dirs = glob.glob(os.path.join(datas_dir, 'summary_results_*net'))
+
+    models_info = {}
+    for dir_path in sorted(model_dirs):
+        dir_name = os.path.basename(dir_path)
+        try:
+            model_prefix = dir_name.replace('summary_results_', '').replace('net', '')
+            model_name = model_prefix.upper() + 'Net'
+            
+            # Garante que apenas modelos da lista sejam incluídos, se a lista foi fornecida
+            if models_to_find and model_name not in models_to_find:
+                continue
+
+            csv_paths = sorted(glob.glob(os.path.join(dir_path, '*.csv')))
+            models_info[model_name] = csv_paths
+        except (IndexError, AttributeError):
+            continue
+
+    # Imprime o relatório final
+    print("\n--- Relatório de Descoberta ---")
+    model_names_found = list(models_info.keys())
+    
+    # Se uma lista foi especificada, use essa ordem. Senão, ordem alfabética.
+    report_order = models_to_find if models_to_find else sorted(model_names_found)
+
+    for model_name in report_order:
+        if model_name not in models_info:
+            continue # O diretório pode não ter sido encontrado
+        csv_list = models_info[model_name]
+        print(f"{model_name}: {len(csv_list)} CSVs encontrados")
+        if not csv_list:
+            print(f"Aviso: nenhum CSV encontrado para {model_name}")
+        print("------------------------------------------------------------")
+    
+    print(f"[INFO] Modelos configurados para execução: {sorted(model_names_found)}")
+    
+    return models_info
+
+
+def resolve_paths_outputs() -> tuple[str, str]:
+    """Resolve caminhos de saída para `outputs/tables` e MA.
+
+    Sobe à raiz do projeto e cria/garante `outputs/tables` e
+    `outputs/tables/Ensemble_Between_Models`.
+
+    Returns:
+        tuple[str, str]: `(tables_dir, ensemble_output_base)` com caminhos absolutos.
+    """
+    # 1. Pega o diretório do script atual (ex: .../projeto/modules)
+    root = os.path.dirname(os.path.abspath(__file__))
+
+    # 2. Sobe um nível para o diretório pai (a raiz do projeto)
+    project_root = os.path.dirname(root)
+
+    # 3. Cria o caminho para 'outputs' a partir da raiz do projeto
+    outputs_dir = os.path.join(project_root, 'outputs')
+    
+    # O resto do código funciona como antes, mas agora a partir do caminho base correto
+    tables_dir = os.path.join(outputs_dir, 'tables')
+    ensemble_output_base = os.path.join(tables_dir, 'Ensemble_Between_Models')
+    
+    os.makedirs(ensemble_output_base, exist_ok=True)
+    
+    return tables_dir, ensemble_output_base
 
 
 # ============================
@@ -226,65 +241,37 @@ def generate_patient_level_table(
     save_output_dir: str | None = None,
     prob_col_candidates: List[str] | None = None,
 ):
-    """
-    Gera diretamente a TABELA de nível de paciente (CSV + DataFrame) a partir de diretórios/paths
-    de folds, abstraindo a agregação dos níveis inferiores (tile→imagem→paciente).
+    """Gera uma tabela consolidada de nível de paciente (CSV + DataFrame).
 
-    Objetivo: permitir consolidar o nível paciente sem precisar executar o pipeline completo.
+    Consolida dados vindos de múltiplas fontes (folds ou modelos), agregando
+    de `tile → image → patient` quando necessário. Suporta métodos de ensemble
+    `hard_voting`, `soft_voting` e `weighted` e calcula incerteza por paciente.
 
-    Parâmetros
-    - sa_or_ma: 'SA' para ensemble por modelo; 'MA' para ensemble entre modelos.
-      • SA: inputs = {'model_name': str, 'csv_paths': List[str]} OU {'model_name': str, 'csv_dir': str}
-      • MA: inputs = {'models': { model_name: {'csv_paths': [...]} OU {'csv_dir': str} }}
+    Args:
+        sa_or_ma (str): Contexto de agregação. `SA` para por modelo, `MA` para
+            entre modelos.
+        inputs: Especificação das fontes. Para `SA`:
+            `{"model_name": str, "csv_paths": List[str]}` ou
+            `{"model_name": str, "csv_dir": str}`. Para `MA`:
+            `{"models": { model_name: {"csv_paths": [...]} ou {"csv_dir": str} }}`.
+        ensemble_type (str): Método de ensemble (`hard_voting`, `soft_voting`,
+            `weighted`).
+        weight_map (dict | None): Pesos por fonte (fold/modelo). Se ausente,
+            assume pesos iguais.
+        save_output_dir (str | None): Diretório para salvar o CSV resultante.
+            Se None, usa `./outputs/tables/manual_patient_level/`.
+        prob_col_candidates (List[str] | None): Lista de possíveis colunas com
+            probabilidades por classe. Defaults incluem
+            `final_probs`, `mean_probs_per_class`, `mean_probs_per_class_image`,
+            `mean_probs_per_class_tile`.
 
-    - ensemble_type: 'hard_voting' | 'soft_voting' | 'weighted'
-    - weight_map: dict opcional com pesos por fonte (fold/modelo). Se não fornecido, assume pesos iguais.
-      • Para SA: chave pode ser o nome do arquivo/fold.
-      • Para MA: chave pode ser o nome do modelo.
-    - save_output_dir: diretório onde salvar o CSV resultante. Se None, cria automaticamente em ./outputs/tables/manual_patient_level/
-    - prob_col_candidates: lista de nomes de coluna com probabilidades por classe. Default tenta: ['final_probs','mean_probs_per_class','mean_probs_per_class_image','mean_probs_per_class_tile']
+    Returns:
+        tuple[str, pd.DataFrame]: Par `(csv_path, df)` com caminho do arquivo
+            gerado e o DataFrame consolidado.
 
-    Retorna
-    - (csv_path, df): caminho do CSV gerado e o DataFrame em memória.
-
-    Entradas esperadas (por CSV)
-    - Deve conter ao menos: 'patient_id', 'true_label'.
-    - Se disponível:
-      • 'image_id' (para agregação robusta de tiles→imagem→paciente quando o CSV é por tile)
-      • 'tile_id' (opcional)
-      • 'predicted_label' (para hard voting quando não houver probabilidades)
-      • Coluna de probabilidades (dict por classe) dentre prob_col_candidates
-
-    Estratégia de agregação
-    1) Normalização dos dados por fonte (fold/modelo):
-       - Carregar todos os CSVs.
-       - Identificar se o CSV é por tile (tem image_id e possivelmente tile_id) ou por imagem.
-       - Converter a coluna de probabilidades para dict (safe_convert_to_dict) quando existir.
-
-    2) Agregação dentro da fonte (fold/modelo):
-       2.1) tile→imagem (se necessário):
-            - soft: média dos vetores P_tile.
-            - hard: modo dos rótulos dos tiles; vetor por contagem normalizada.
-            - weighted: igual aos anteriores, mas aplicando pesos por tile (se fornecido via weight_map_tile, não obrigatório; por padrão iguais).
-       2.2) imagem→paciente:
-            - soft: média dos vetores P_image.
-            - hard: modo dos rótulos das imagens; vetor de contagem normalizada.
-            - weighted: aplicar pesos por imagem (se fornecido; por padrão iguais).
-
-    3) Agregação entre fontes:
-       - SA: agrega entre folds do MESMO modelo.
-       - MA: agrega entre modelos.
-       - soft: média (ou média ponderada por weight_map) dos vetores P_patient por fonte.
-       - hard: modo dos rótulos por fonte (ou somatório ponderado de votos).
-
-    4) Cálculo de incerteza:
-       - U_patient = 1 - max(P_patient) ou entropia normalizada.
-
-    Observações
-    - Quando não existe uma coluna de probabilidades, o método soft/weighted tenta cair para hard usando 'predicted_label'.
-    - Pesos: se weight_map não for fornecido, assume pesos iguais para todas as fontes.
-    - Classes: inferidas a partir de true_label e/ou chaves dos dicts de probabilidade.
-
+    Raises:
+        ValueError: Quando os dados mínimos não estão presentes (ex.: `patient_id`
+            e `true_label`) ou `sa_or_ma` inválido.
     """
     prob_col_candidates = prob_col_candidates or [
         'final_probs', 'mean_probs_per_class', 'mean_probs_per_class_image', 'mean_probs_per_class_tile'

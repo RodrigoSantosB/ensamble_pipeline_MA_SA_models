@@ -1,3 +1,11 @@
+"""Ensemble entre diferentes modelos em três níveis: tile, image e patient.
+
+Fornece a classe `BetweenModelsEnsembler` que combina saídas de múltiplos
+modelos utilizando hard voting, soft voting ou votação ponderada por métricas.
+Mantém a compatibilidade com nomes de arquivos e estruturas dos scripts
+originais do projeto (SA/MA).
+"""
+import os
 import os
 import ast
 import json
@@ -36,6 +44,21 @@ class BetweenModelsEnsembler:
         ensemble_type: str = "hard_voting",
         weight_metric: str = "f1_macro",
     ) -> None:
+        """Inicializa o orquestrador de ensemble entre modelos.
+
+        Args:
+            base_models_parent_directory: Diretório base contendo os resultados
+                individuais por modelo (ex.: `.../outputs/tables/{MODEL}`).
+            ensemble_save_output_base: Diretório onde salvar os artefatos de
+                ensemble entre modelos.
+            models_to_include: Lista com nomes dos modelos a combinar.
+            ensemble_type: Tipo de ensemble ("hard_voting", "soft_voting" ou "weighted").
+            weight_metric: Métrica de ponderação quando `ensemble_type` é "weighted"
+                ("accuracy", "f1_macro", "recall_weighted", "roc_auc_ovr").
+
+        Returns:
+            None. Configura atributos internos e diretórios de saída.
+        """
         self.base_models_parent_directory = base_models_parent_directory
         self.ensemble_save_output_base = ensemble_save_output_base
         self.models_to_include = models_to_include
@@ -47,6 +70,17 @@ class BetweenModelsEnsembler:
     # ------------------------------
     @staticmethod
     def _safe_literal_eval(x: Any) -> Any:
+        """Converte strings literais para objetos Python de forma segura.
+
+        Retorna `np.nan` caso falhe ou quando o valor seja NaN. Se `x` já for
+        `dict` ou `list`, retorna o próprio valor.
+
+        Args:
+            x: Valor que pode ser string, `dict`, `list` ou outros tipos.
+
+        Returns:
+            Objeto convertido (por exemplo, `dict`) ou `np.nan` em caso de erro.
+        """
         if pd.isna(x):
             return np.nan
         if isinstance(x, (dict, list)):
@@ -58,10 +92,31 @@ class BetweenModelsEnsembler:
 
     @staticmethod
     def _majority_vote(labels: List[str]) -> Any:
+        """Retorna o rótulo mais frequente (votação simples).
+
+        Args:
+            labels: Lista de rótulos previstos.
+
+        Returns:
+            Rótulo com maior frequência ou `np.nan` se a lista estiver vazia.
+        """
         return Counter(labels).most_common(1)[0][0] if labels else np.nan
 
     @staticmethod
     def _normalize_dict_probs(d: Dict[str, float], all_labels: List[str]) -> Dict[str, float]:
+        """Normaliza um dicionário de probabilidades para conter todas as classes.
+
+        Garante a presença de todas as classes em `all_labels` e normaliza os
+        valores para somarem 1. Caso a soma seja zero, aplica distribuição
+        uniforme como fallback.
+
+        Args:
+            d: Dicionário com probabilidades por classe.
+            all_labels: Lista de classes esperadas.
+
+        Returns:
+            Dicionário de probabilidades por classe normalizado.
+        """
         vec = {label: float(d.get(label, 0.0)) for label in all_labels}
         total = sum(vec.values())
         if total > 0:
@@ -74,6 +129,16 @@ class BetweenModelsEnsembler:
     # Voting methods (generic)
     # ------------------------------
     def _soft_voting_probs(self, group: pd.DataFrame, probs_col: str, all_labels: List[str]) -> Dict[str, float]:
+        """Agrega probabilidades por média (soft voting) em um grupo.
+
+        Args:
+            group: DataFrame agrupado por chave (tile, paciente, etc.).
+            probs_col: Nome da coluna que contém o dict de probabilidades.
+            all_labels: Lista de classes esperadas.
+
+        Returns:
+            Dicionário com probabilidades médias por classe.
+        """
         mean_probs: Dict[str, List[float]] = {cls: [] for cls in all_labels}
         for _, row in group.iterrows():
             probs_dict = row[probs_col]
@@ -84,6 +149,18 @@ class BetweenModelsEnsembler:
         return self._normalize_dict_probs(averaged, all_labels)
 
     def _weighted_voting_probs(self, group: pd.DataFrame, probs_col: str, all_labels: List[str], weights: Dict[str, float], model_col: str) -> Dict[str, float]:
+        """Agrega probabilidades por média ponderada (weighted voting).
+
+        Args:
+            group: DataFrame agrupado por chave (tile, paciente, etc.).
+            probs_col: Coluna com dicionários de probabilidades.
+            all_labels: Lista de classes esperadas.
+            weights: Pesos por modelo (ou outra chave) para ponderação.
+            model_col: Coluna que identifica o modelo de cada linha.
+
+        Returns:
+            Dicionário com probabilidades médias ponderadas por classe.
+        """
         weighted_sum = {cls: 0.0 for cls in all_labels}
         total_weight = 0.0
         for _, row in group.iterrows():
@@ -104,6 +181,20 @@ class BetweenModelsEnsembler:
     # Tile level
     # ------------------------------
     def run_tile_level(self) -> Tuple[str, str]:
+        """Executa o ensemble entre modelos no nível de tile.
+
+        - Carrega CSVs de cada modelo, padroniza colunas e constrói um único
+          DataFrame.
+        - Aplica o método de votação (`hard`, `soft` ou `weighted`) por `(patient_id, tile_name)`.
+        - Salva o CSV consolidado e um JSON com métricas.
+
+        Returns:
+            Tupla `(csv_path, metrics_path)` com os artefatos gerados.
+
+        Raises:
+            RuntimeError: Se não houver dados válidos de nenhum modelo.
+            ValueError: Se `self.ENSEMBLE_TYPE` for desconhecido.
+        """
         # Input paths per model
         def get_paths(model_name: str) -> Tuple[str, str]:
             subfolder = f"Ensemble_tile_level_{self.ENSEMBLE_TYPE if self.ENSEMBLE_TYPE != 'weighted' else 'weighted'}"
@@ -214,6 +305,19 @@ class BetweenModelsEnsembler:
     # Image level
     # ------------------------------
     def run_image_level(self) -> Tuple[str, str]:
+        """Executa o ensemble entre modelos no nível de imagem.
+
+        - Carrega CSVs de imagem de cada modelo e consolida em um único
+          DataFrame indexado por `patient_id`.
+        - Aplica votação (`hard`, `soft` ou `weighted`) por paciente.
+        - Salva CSV consolidado e JSON de métricas.
+
+        Returns:
+            Tupla `(csv_path, metrics_path)` com os artefatos de saída.
+
+        Raises:
+            ValueError: Se `self.ENSEMBLE_TYPE` for desconhecido.
+        """
         def get_paths(model_name: str) -> Tuple[str, str]:
             if self.ENSEMBLE_TYPE == 'weighted':
                 subfolder = "Ensemble_image_level_weighted"
@@ -315,6 +419,20 @@ class BetweenModelsEnsembler:
     # Patient level
     # ------------------------------
     def run_patient_level(self) -> Tuple[str, str]:
+        """Executa o ensemble entre modelos no nível de paciente.
+
+        - Carrega CSVs de paciente por modelo, consolidando em um único
+          DataFrame.
+        - Aplica votação (`hard`, `soft` ou `weighted`) por paciente.
+        - Salva CSV consolidado e JSON com métricas.
+
+        Returns:
+            Tupla `(csv_path, metrics_path)` com os caminhos de saída.
+
+        Raises:
+            RuntimeError: Se não houver dados válidos em nenhum modelo.
+            ValueError: Se `self.ENSEMBLE_TYPE` for desconhecido.
+        """
         def get_paths(model_name: str) -> Tuple[str, str]:
             subfolder = f"Ensemble_patient_level_{self.ENSEMBLE_TYPE if self.ENSEMBLE_TYPE != 'weighted' else 'weighted'}"
             if self.ENSEMBLE_TYPE == 'weighted':
@@ -468,6 +586,22 @@ class BetweenModelsEnsembler:
         level_key: str,
         model_weights: Dict[str, float] | None = None,
     ) -> None:
+        """Calcula e salva métricas globais (accuracy, F1, recall, ROC-AUC).
+
+        - Constrói `y_scores` a partir de `final_probs` ou `mean_probs_per_class`.
+        - Calcula métricas clássicas e grava um JSON em `metrics_path`.
+
+        Args:
+            df_clean: DataFrame com `true_label` e `predicted_label` sem NaN.
+            all_labels_list: Lista ordenada de classes usadas para compor `y_scores`.
+            label_to_int: Mapeamento de rótulos para índices inteiros.
+            metrics_path: Caminho do arquivo JSON a ser escrito.
+            level_key: Chave para indicar o total de amostras (por exemplo, `total_tiles`).
+            model_weights: Pesos usados no ensemble ponderado (opcional).
+
+        Returns:
+            None. Cria/atualiza o arquivo JSON com as métricas calculadas.
+        """
         if df_clean.empty:
             # still create an empty metrics file to match behavior
             with open(metrics_path, 'w') as f:
